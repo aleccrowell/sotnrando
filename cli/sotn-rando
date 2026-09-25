@@ -1,76 +1,190 @@
 #!/usr/bin/env bash
-# Convenience wrapper around `node randomize` for local CLI use.
-#
-#   cli/sotn-rando [wrapper options] [randomize options] [seed-url]
-#
-# Wrapper options:
-#   --out-dir DIR   where to write output (default: <repo>/seeds, gitignored)
-#   --name NAME     output basename (default: sotn-<preset>-<seed>)
-#
-# Everything else is passed straight to `node randomize` (see
-# `node randomize --help`). The vanilla image comes from $SOTN_VANILLA_BIN
-# (default ~/.local/share/sotn-rando/vanilla.bin; create it with
-# cli/prepare-image.js). A seed is generated if none is given so the output
-# name is reproducible. Writes NAME.bin, NAME.cue and NAME.log (race info).
+# sotn-rando: one entry point for running this randomizer fork from the CLI.
+# Run `cli/sotn-rando help` for usage; see cli/README.md for details.
 
 set -euo pipefail
 
 repo="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
-vanilla="${SOTN_VANILLA_BIN:-$HOME/.local/share/sotn-rando/vanilla.bin}"
-out_dir="$repo/seeds"
-name=""
-preset="default"
-seed=""
-url=""
-has_verbosity=0
-args=()
+data_dir="${SOTN_RANDO_DATA:-$HOME/.local/share/sotn-rando}"
+vanilla="$data_dir/vanilla.bin"
+# Refer to ourselves the way the user can re-run us.
+prog="$(basename "$0")"
+command -v "$prog" >/dev/null || prog="$0"
 
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --out-dir) out_dir="$2"; shift 2; continue ;;
-    --name) name="$2"; shift 2; continue ;;
-    -i|--in-bin|-o|--out)
-      echo "sotn-rando: $1 is set by the wrapper (use \$SOTN_VANILLA_BIN / --out-dir / --name)" >&2
-      exit 2 ;;
-    -p|--preset) preset="$2" ;;
-    -f|--preset-file) preset="$(basename "${2%.json}")" ;;
-    -s|--seed) seed="$2" ;;
-    -r|--race|-q|--quiet|-t|--tournament|-v*|--verbose) has_verbosity=1 ;;
-    https://*|http://*) url="$1" ;;
-  esac
-  args+=("$1")
-  case "$1" in
-    -p|--preset|-f|--preset-file|-s|--seed) args+=("$2"); shift ;;
-  esac
-  shift
-done
+usage() {
+  cat <<EOF
+Usage: $prog <command>
 
-if [ ! -f "$vanilla" ]; then
-  echo "sotn-rando: vanilla image not found at $vanilla" >&2
-  echo "  create it with: $repo/cli/prepare-image.js <dump.cue> $vanilla" >&2
-  exit 1
-fi
+Commands:
+  setup <dump.cue>        One-time: install dependencies and prepare your
+                          SotN (USA) disc dump
+  [options] [seed-url]    Randomize (the default when no command is given)
+  presets                 List the built-in presets
+  burn <seed> [options]   Burn a randomized disc to CD-R (uses psxdr)
+  sync [--push]           Merge the latest upstream randomizer into this fork
 
-if [ -n "$url" ]; then
-  # Seed and options come from the URL.
-  : "${name:=sotn-$(printf '%s' "${url#*\?}" | tr -c 'A-Za-z0-9._-' '_')}"
-else
-  if [ -z "$seed" ]; then
-    seed="$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')"
-    args+=(-s "$seed")
-  fi
-  : "${name:=sotn-${preset}-$(printf '%s' "$seed" | tr -c 'A-Za-z0-9._-' '_')}"
-fi
-[ "$has_verbosity" = 1 ] || args+=(-r)
+Randomize options:
+  -p, --preset NAME     use a preset (see '$prog presets')
+  -s, --seed SEED       seed to use (default: a new random one)
+  -t, --tournament      don't print spoilers
+  -vvv                  print full spoilers (relic locations)
+  --out-dir DIR         where to write output (default: $repo/seeds)
+  --name NAME           output file name (default: sotn-<preset>-<seed>)
+  --track1-only         write just the data track instead of the full disc
+  Any other option goes straight to the randomizer; see
+  'node randomize --help' and 'node randomize --help options'.
 
-mkdir -p "$out_dir"
-bin="$out_dir/$name.bin"
-cd "$repo"
-node randomize -i "$vanilla" -o "$bin" "${args[@]}" | tee "$out_dir/$name.log"
+Burn options (anything else goes to 'psxdr burn'):
+  --device DEV          CD writer (list them with --list-devices)
+  --speed X             burn speed (default: 4)
+  --simulate            test run without writing
 
-cat > "$out_dir/$name.cue" <<EOF
-FILE "$name.bin" BINARY
-  TRACK 01 MODE2/2352
-    INDEX 01 00:00:00
+Examples:
+  $prog setup "\$HOME/archive/Castlevania- Symphony of the Night/Castlevania- Symphony of the Night.cue"
+  $prog -p safe
+  $prog -p nimble -s myseed -t
+  $prog burn sotn-nimble-myseed --device /dev/sr0 --simulate
 EOF
-echo "Wrote $out_dir/$name.cue"
+}
+
+die() {
+  echo "$prog: $*" >&2
+  exit 1
+}
+
+need_deps() {
+  [ -d "$repo/node_modules" ] || die "dependencies not installed; run '$prog setup <dump.cue>' first"
+}
+
+cmd_setup() {
+  [ $# -eq 1 ] || die "usage: $prog setup <dump.cue>"
+  if [ ! -d "$repo/node_modules" ]; then
+    echo "Installing dependencies..."
+    (cd "$repo" && npm ci --no-audit --no-fund)
+  fi
+  node "$repo/cli/lib/setup.js" "$1" "$data_dir"
+  echo
+  echo "Setup complete. Try: $prog -p safe"
+}
+
+cmd_presets() {
+  # Name, id and a one-line summary for each built-in preset.
+  node -e '
+    const cols = process.stdout.columns || 100
+    for (const p of require(process.argv[1])) {
+      const line = "  " + p.id.padEnd(22) + (p.description || "").replace(/\s+/g, " ")
+      console.log(line.length > cols ? line.slice(0, cols - 3) + "..." : line)
+    }
+  ' "$repo/preset-data.json"
+  echo
+  echo "Use one with: $prog -p <id>"
+}
+
+cmd_randomize() {
+  local out_dir="$repo/seeds" name="" preset="default" seed="" url=""
+  local has_verbosity=0 full_disc=1 args=()
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --out-dir) out_dir="$2"; shift 2; continue ;;
+      --name) name="$2"; shift 2; continue ;;
+      --track1-only) full_disc=0; shift; continue ;;
+      -i|--in-bin|-o|--out)
+        die "$1 is handled for you (use --out-dir / --name)" ;;
+      -p|--preset) preset="$2" ;;
+      -f|--preset-file) preset="$(basename "${2%.json}")" ;;
+      -s|--seed) seed="$2" ;;
+      -r|--race|-q|--quiet|-t|--tournament|-v*|--verbose) has_verbosity=1 ;;
+      https://*|http://*) url="$1" ;;
+    esac
+    args+=("$1")
+    case "$1" in
+      -p|--preset|-f|--preset-file|-s|--seed) args+=("$2"); shift ;;
+    esac
+    shift
+  done
+
+  need_deps
+  [ -f "$vanilla" ] || die "no vanilla image yet; run '$prog setup <dump.cue>' first"
+  if [ "$full_disc" = 1 ] && [ ! -f "$data_dir/rest.bin" ]; then
+    # Setup was given a track-1-only dump, so there is nothing to append.
+    full_disc=0
+  fi
+
+  if [ -n "$url" ]; then
+    # Seed and options come from the URL.
+    : "${name:=sotn-$(printf '%s' "${url#*\?}" | tr -c 'A-Za-z0-9._-' '_')}"
+  else
+    if [ -z "$seed" ]; then
+      seed="$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')"
+      args+=(-s "$seed")
+    fi
+    : "${name:=sotn-${preset}-$(printf '%s' "$seed" | tr -c 'A-Za-z0-9._-' '_')}"
+  fi
+  [ "$has_verbosity" = 1 ] || args+=(-r)
+
+  mkdir -p "$out_dir"
+  local bin="$out_dir/$name.bin" cue="$out_dir/$name.cue"
+  (cd "$repo" && node randomize -i "$vanilla" -o "$bin" "${args[@]}") \
+    | tee "$out_dir/$name.log"
+
+  if [ "$full_disc" = 1 ]; then
+    cat "$data_dir/rest.bin" >> "$bin"
+    sed "s/@BIN@/$name.bin/" "$data_dir/disc.cue" > "$cue"
+  else
+    printf 'FILE "%s" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n' \
+      "$name.bin" > "$cue"
+  fi
+  echo
+  echo "Wrote $cue"
+  local ref="$name"
+  [ "$out_dir" = "$repo/seeds" ] || ref="$cue"
+  echo "  (load this in an emulator, or burn it with: $prog burn $ref --device <dev>)"
+}
+
+find_psxdr() {
+  if [ -n "${PSXDR:-}" ]; then
+    echo "$PSXDR"
+  elif command -v psxdr >/dev/null; then
+    command -v psxdr
+  elif [ -x "$repo/../psxdr/.venv/bin/psxdr" ]; then
+    echo "$repo/../psxdr/.venv/bin/psxdr"
+  else
+    die "psxdr not found; install it, put it on PATH, or set PSXDR=/path/to/psxdr"
+  fi
+}
+
+cmd_burn() {
+  [ $# -ge 1 ] || die "usage: $prog burn <seed name or .cue> [--device DEV] [options]"
+  local target="$1" cue
+  shift
+  case "$target" in
+    *.cue) cue="$target" ;;
+    *.bin) cue="${target%.bin}.cue" ;;
+    *) cue="$repo/seeds/$target.cue" ;;
+  esac
+  [ -f "$cue" ] || die "no such seed: $cue"
+  local bin="${cue%.cue}.bin"
+  [ -f "$bin" ] || die "missing image for $cue"
+
+  local extra=() has_speed=0
+  for a in "$@"; do
+    case "$a" in --speed|--speed=*) has_speed=1 ;; esac
+    extra+=("$a")
+  done
+  [ "$has_speed" = 1 ] || extra+=(--speed 4)
+  if ! grep -q 'TRACK 02' "$cue"; then
+    echo "Note: $cue has no audio track 2 (--track1-only); burning the data track only."
+  fi
+  exec "$(find_psxdr)" burn "$bin" --cue "$cue" "${extra[@]}"
+}
+
+case "${1:-}" in
+  setup) shift; cmd_setup "$@" ;;
+  presets) shift; cmd_presets ;;
+  burn) shift; cmd_burn "$@" ;;
+  sync) shift; exec "$repo/cli/lib/sync.sh" "$@" ;;
+  help|-h|--help) usage ;;
+  ''|-*|http://*|https://*) cmd_randomize "$@" ;;
+  *) echo "$prog: unknown command '$1'" >&2; echo >&2; usage >&2; exit 2 ;;
+esac

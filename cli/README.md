@@ -1,221 +1,159 @@
-# Fork CLI tooling
+# sotn-rando: command-line randomizing
 
-Local command-line helpers for this fork of the
-[SotN randomizer](https://github.com/sotnrando/sotnrando). Everything
-fork-specific lives in this `cli/` directory. Upstream files are left
-untouched, so merging upstream updates never conflicts.
+This fork adds one command, `cli/sotn-rando`. It takes a
+Castlevania: Symphony of the Night disc dump and produces randomized discs
+that you can play in an emulator or burn to CD-R. It also keeps the fork up to
+date with the [upstream randomizer](https://github.com/sotnrando/sotnrando).
 
-| Script | Purpose |
+```shell
+cli/sotn-rando setup path/to/sotn.cue   # once
+cli/sotn-rando -p safe                  # make a randomized disc
+cli/sotn-rando burn <seed> --device /dev/sr0
+cli/sotn-rando sync                     # pull in upstream updates
+```
+
+Run `cli/sotn-rando help` for a summary of all commands and options.
+
+## 1. Setup (once)
+
+You need Node.js 15+ and a dump of **Castlevania: Symphony of the Night
+(USA)**. Point `setup` at the dump's `.cue` sheet:
+
+```shell
+cli/sotn-rando setup "$HOME/archive/Castlevania- Symphony of the Night/Castlevania- Symphony of the Night.cue"
+```
+
+`setup` installs the randomizer's dependencies if needed. It then checks the
+dump and saves what later commands need in `~/.local/share/sotn-rando/`:
+
+| File | What it is |
 | --- | --- |
-| `prepare-image.js` | Turn a SotN (USA) disc dump into the exact vanilla track 1 `.bin` the randomizer requires |
-| `sotn-rando` | Wrapper around `node randomize` that handles the input and output paths and writes `.bin` + `.cue` + log |
-| `sync-upstream` | Merge the latest upstream randomizer into this fork, then smoke-test it |
+| `vanilla.bin` | Track 1 (the game data), the input the randomizer requires |
+| `rest.bin` | The remaining track (the audio track 2), used to rebuild the full disc |
+| `disc.cue` | The original disc's track layout |
 
-## One-time setup
+Your dump itself is never modified. Most dump formats work:
 
-```shell
-cd sotnrando
-npm ci                                   # install dependencies
-mkdir -p ~/.local/share/sotn-rando
-cli/prepare-image.js "path/to/Castlevania- Symphony of the Night.cue" \
-    ~/.local/share/sotn-rando/vanilla.bin
-```
+- a single `.bin` holding every track, or one `.bin` per track
+- 2352-byte sectors, or 2448-byte sectors that include subchannel data (as
+  [psxdr](https://github.com/aleccrowell/psxdr) captures produce)
 
-### Why `prepare-image.js` is needed
+If the data doesn't match an unmodified SotN (USA) disc, `setup` reports an
+error and saves nothing. The randomizer only works from a clean original.
 
-The randomizer only accepts a disc image whose SHA-256 matches the vanilla
-SotN (USA, SLUS-00067) **track 1** exactly. That track is 229020 sectors ×
-2352 bytes = 538,655,040 bytes. Many dumps don't match as-is:
+Passing a bare `.bin` instead of a `.cue` also works. Only track 1 is saved
+in that case, so randomized discs come out without the audio track.
 
-- **Multi-track single-file .bin**: track 1 and the audio track 2 are in one
-  file. The script reads the `.cue` to find where track 1 ends.
-- **Subchannel data**: the dump uses 2448-byte sectors (2352 + 96 bytes of
-  subchannel). The script detects this from the sync headers and strips it.
-  The dump in `~/archive/Castlevania- Symphony of the Night/` is this kind.
-
-The script verifies the result against the randomizer's expected digest and
-deletes the output if it doesn't match. It accepts either a `.cue` (preferred,
-because it can then cut off track 2) or a bare `.bin`.
-
-## Generating seeds: `sotn-rando`
+## 2. Randomize
 
 ```shell
-cli/sotn-rando                         # default settings, random seed
-cli/sotn-rando -p safe                 # preset
-cli/sotn-rando -p nimble -s myseed     # preset + specific seed
-cli/sotn-rando -p safe -t              # tournament mode (no spoilers)
-cli/sotn-rando -p safe -vvv            # full spoiler output (relic locations)
-cli/sotn-rando --out-dir ~/roms/sotn --name tonight -p casual
+cli/sotn-rando                          # default settings, random seed
+cli/sotn-rando -p safe                  # choose a preset
+cli/sotn-rando -p nimble -s myseed      # choose a preset and seed
+cli/sotn-rando -p safe -t               # tournament mode: no spoilers
+cli/sotn-rando -p safe -vvv             # full spoilers (relic locations)
+cli/sotn-rando presets                  # list the presets
 ```
 
-Output goes to `sotnrando/seeds/` by default. That directory is gitignored.
-Each run writes:
+Each run writes three files to `seeds/` in this repo. That directory is
+gitignored.
 
-- `NAME.bin`: the randomized track 1 image, playable in any PSX emulator or
-  via POPStarter using the `.cue`. To burn a CD, see
-  [Rebuilding a full disc image](#rebuilding-a-full-disc-image-after-randomizing).
-- `NAME.cue`: a single-track cue sheet for it
-- `NAME.log`: the console output (seed URL, seed, starting equipment, or more
-  if you asked for more verbosity)
+| File | Contents |
+| --- | --- |
+| `sotn-<preset>-<seed>.bin` | The randomized disc |
+| `sotn-<preset>-<seed>.cue` | Its cue sheet: **open this in your emulator** |
+| `sotn-<preset>-<seed>.log` | Seed URL, seed and starting equipment (or full spoilers with `-vvv`) |
 
-`NAME` defaults to `sotn-<preset>-<seed>`, for example
-`sotn-safe-fe9c642b`.
+The output is a complete copy of the disc: the randomized data track plus the
+original audio track, in the original layout. Use it for emulators and for
+burning. For POPStarter on a PS2 (see the [main README](../README.md#console)),
+add `--track1-only`, which matches the single-track cue that guide uses.
 
-Behavior:
+Options:
 
-- **Input image**: `$SOTN_VANILLA_BIN`, default
-  `~/.local/share/sotn-rando/vanilla.bin`. You can't pass `-i`/`-o`; use
-  `--out-dir`/`--name` instead.
-- **Seed**: if you don't give `-s`, a random 8-hex-digit seed is generated
-  and passed explicitly. That way the file name records it and the run can be
-  reproduced.
-- **Verbosity**: unless you pass `-v…`, `-r`, `-q` or `-t`, the wrapper adds
-  `-r` (race mode: prints the seed URL and starting equipment).
-- **Other options**: everything else is passed straight to `node randomize`.
-  See `node randomize --help`, `node randomize --help preset` and
-  `node randomize --help options` for the full list of presets and toggles,
-  for example `-z` (anti-freeze), `-y` (my purse), `-9` (fast warp),
-  `-l` (color rando), `-f presets/mypreset.json` (custom preset file).
+- `-p/--preset NAME` and `-s/--seed SEED`: without `-s`, a random seed is
+  picked and recorded in the file name. The same preset, seed and options
+  always produce the same disc.
+- `--out-dir DIR` and `--name NAME` control where output goes and what it's
+  called.
+- `--track1-only` writes just the data track, without audio track 2. The
+  disc is 45 MB smaller and still plays fine.
+- Every other option goes straight to the randomizer. For example, `-z`
+  (no level-up freezes), `-y` (Death doesn't take your gear), `-9` (fast
+  warps), `-l` (random colors), or `-f my-preset.json` (your own preset). See
+  `node randomize --help` and `node randomize --help options` for the full
+  list.
 
-A given preset + seed + options always produces a byte-identical image, the
-same as a direct `node randomize -i … -o …` run.
+## 3. Burn to CD-R (optional)
 
-### Known upstream issue: seed URLs
+`burn` uses [psxdr](https://github.com/aleccrowell/psxdr) to write a seed to
+a blank CD-R. It finds psxdr through `$PSXDR`, then your `PATH`, then a
+checkout next to this repo (`../psxdr`, after `poetry install` there).
+
+```shell
+cli/sotn-rando burn sotn-safe-1a2b3c4d --list-devices          # find your burner
+cli/sotn-rando burn sotn-safe-1a2b3c4d --device /dev/sr0 --simulate
+cli/sotn-rando burn sotn-safe-1a2b3c4d --device /dev/sr0
+```
+
+You can name a seed from `seeds/` by its name, or pass the path to any
+`.cue`. Burns run at 4x unless you pass `--speed`, because slow burns read
+more reliably on original PlayStation hardware. Any other options go to
+`psxdr burn`.
+
+Before writing, psxdr checks the image for errors. Randomized discs pass
+cleanly.
+
+### Checking a disc (optional)
+
+```shell
+../psxdr/.venv/bin/psxdr verify seeds/sotn-safe-1a2b3c4d.bin
+```
+
+This compares the disc with the Redump database. For a randomized disc, expect
+track 2 to match and track 1 to differ. `verify` then exits with status 1 and
+suggests recovery commands. Ignore that advice: the difference is the
+randomization.
+
+### About `.iso` files
+
+`psxdr convert <disc>.bin <disc>.iso --to-format iso --cue <disc>.cue` (needs
+`bchunk`) produces a 2048-byte-per-sector ISO. **Don't play or burn it.** SotN
+stores its music and cutscenes in sectors that an ISO cuts short, so they
+break. An ISO is only useful for browsing the disc's files.
+
+## Keeping up to date with upstream
+
+```shell
+cli/sotn-rando sync          # merge the latest upstream into this branch
+cli/sotn-rando sync --push   # ...and push it to your fork
+```
+
+`sync` does the following:
+
+1. Adds the `upstream` remote if it's missing.
+2. Merges `sotnrando/sotnrando`'s `master` branch.
+3. Reinstalls dependencies if they changed.
+4. Runs a quick test generation to make sure the randomizer still works.
+
+It needs a clean working tree. All of this fork's files live in `cli/`, so
+upstream merges don't conflict with them.
+
+If a future upstream version stops accepting your dump
+(`Disc image is not a valid or vanilla backup`), run `setup` again. If
+`setup` then fails too, upstream has changed which disc version it supports.
+
+## Tips
+
+- **Put it on your PATH:** `ln -s "$PWD/cli/sotn-rando" ~/.local/bin/`.
+  Then run `sotn-rando -p safe` from any directory.
+- **Keep the data somewhere else:** set `SOTN_RANDO_DATA=/some/dir` for both
+  `setup` and later runs.
+
+## Known issue: seed URLs
 
 Passing a seed URL (`cli/sotn-rando https://sotn.io/?43a,abc`) currently fails
-with `Checksum mismatch.`. The upstream `node randomize` fails the same way on
-URLs it printed itself (as of upstream `711757a`), so this is not a wrapper
-bug. Until upstream fixes it, reproduce a seed with its preset, seed and
-options instead (`-p safe -s abc`).
-
-## Rebuilding a full disc image after randomizing
-
-`sotn-rando` outputs **track 1 only**, with a single-track `.cue`. That's
-enough for emulators and POPStarter. The real disc also has a short audio
-track 2 (the "don't play track 2 in a CD player" warning). To get a complete
-disc image, for burning to CD-R or for an archive that matches the original
-layout, put the randomized track 1 back in front of the original track 2.
-
-These steps use [psxdr](https://github.com/aleccrowell/psxdr), checked out
-next to this repo at `../psxdr`:
-
-```shell
-cd ../psxdr && poetry install --with iso && cd -     # once
-PSXDR="$(realpath ../psxdr/.venv/bin/psxdr)"        # absolute, so it survives `cd`
-DUMP="$HOME/archive/Castlevania- Symphony of the Night"
-```
-
-### 1. Make a 2352-byte copy of the full original disc (once)
-
-The archived dump carries 96 bytes of subchannel per sector. Strip it so its
-sectors line up with the randomizer's 2352-byte output:
-
-```shell
-$PSXDR convert "$DUMP/Castlevania- Symphony of the Night.bin" \
-    ~/.local/share/sotn-rando/vanilla-full.bin --to-format strip
-```
-
-The result is 583,331,280 bytes: 248,015 sectors, track 1 followed by
-track 2.
-
-### 2. Replace track 1 with the randomized one
-
-Track 1 is the first 538,655,040 bytes (229,020 sectors), exactly the size of
-`sotn-rando`'s output. Keep everything after that from the original:
-
-```shell
-NAME=sotn-safe-fe9c642b                  # a seed made by cli/sotn-rando
-cd seeds
-{ cat "$NAME.bin"; tail -c +538655041 ~/.local/share/sotn-rando/vanilla-full.bin; } \
-    > "$NAME-full.bin"
-sed "s/^FILE \".*\"/FILE \"$NAME-full.bin\"/" \
-    "$DUMP/Castlevania- Symphony of the Night.cue" > "$NAME-full.cue"
-```
-
-The `.cue` is the original two-track layout with the file name changed:
-
-```
-FILE "sotn-safe-fe9c642b-full.bin" BINARY
-  TRACK 01 MODE2/2352
-    INDEX 01 00:00:00
-  TRACK 02 AUDIO
-    INDEX 00 50:53:45
-    INDEX 01 50:55:45
-```
-
-### 3. Check it (optional)
-
-```shell
-$PSXDR verify "$NAME-full.bin"
-```
-
-Expect **track 02 to match Redump** and **track 01 to differ**, because it's
-randomized. `verify` exits with status 1 and recommends `recover`/`salvage`.
-Ignore that advice: the "damage" is the randomization.
-
-The same splice with the vanilla track 1
-(`~/.local/share/sotn-rando/vanilla.bin`) reproduces the original disc and
-matches Redump on both tracks. That's how this procedure was checked.
-
-### 4. Burn it
-
-```shell
-$PSXDR burn "$NAME-full.bin" --cue "$NAME-full.cue" --list-devices
-$PSXDR burn "$NAME-full.bin" --cue "$NAME-full.cue" --device /dev/sr0 --speed 4 --simulate
-$PSXDR burn "$NAME-full.bin" --cue "$NAME-full.cue" --device /dev/sr0 --speed 4
-```
-
-`burn` runs a preflight scan first. A rebuilt randomized image passes it
-cleanly (0 EDC failures, 0 MSF mismatches), because the randomizer recomputes
-EDC/ECC for every sector it touches. `--fix-msf` isn't needed. Burn at 4x
-for original PS1 hardware.
-
-### A note on `.iso`
-
-```shell
-$PSXDR convert "$NAME-full.bin" "$NAME.iso" --to-format iso --cue "$NAME-full.cue"   # needs bchunk
-```
-
-This produces a 2048-byte-per-sector ISO of track 1 (469,032,960 bytes), plus
-`<name>02.cdr` with the raw track 2 audio. That's the layout of the `.iso`/`.cdr`
-pair in `~/archive`.
-
-**Don't play from the `.iso`.** SotN has 172,976 Mode 2 Form 2 sectors
-(XA music and FMV) whose 2324-byte payloads get cut to 2048 bytes, so music
-and cutscenes break. The ISO is only useful for browsing or extracting the
-filesystem. For playing or burning, use the `.bin`/`.cue` from step 2.
-
-## Keeping up to date with upstream: `sync-upstream`
-
-```shell
-cli/sync-upstream          # merge upstream/master into the current branch
-cli/sync-upstream --push   # ...and push the result to origin
-```
-
-The script:
-
-1. Adds the `upstream` remote (`https://github.com/sotnrando/sotnrando.git`)
-   if it's missing.
-2. Refuses to run on a dirty working tree.
-3. Fetches and merges `upstream/master` into the current branch.
-4. Runs `npm ci` if `package.json` or `package-lock.json` changed.
-5. Runs a dry-run smoke test (`node randomize -s sync-smoke-test -p safe`,
-   no image needed).
-
-Merges should be conflict-free as long as fork changes stay inside `cli/`.
-If you do change upstream files, keep those edits small so conflicts stay easy
-to resolve.
-
-When upstream changes the vanilla digest (it hasn't historically),
-`sotn-rando` will report `Disc image is not a valid or vanilla backup`. In that
-case, re-run `prepare-image.js`. If the new digest still doesn't match your
-dump, upstream's supported disc version has changed.
-
-## Optional: put `sotn-rando` on your PATH
-
-```shell
-ln -s "$PWD/cli/sotn-rando" ~/.local/bin/sotn-rando
-```
-
-The wrapper resolves symlinks to find the repo, so it works from any
-directory.
+with `Checksum mismatch.`. The upstream randomizer fails the same way on URLs
+it printed itself (as of upstream `711757a`), so this is an upstream bug.
+Until it's fixed, recreate a seed from its preset and seed instead:
+`-p safe -s abc`.
