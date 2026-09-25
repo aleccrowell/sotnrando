@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# Convenience wrapper around `node randomize` for local CLI use.
+#
+#   cli/sotn-rando [wrapper options] [randomize options] [seed-url]
+#
+# Wrapper options:
+#   --out-dir DIR   where to write output (default: <repo>/seeds, gitignored)
+#   --name NAME     output basename (default: sotn-<preset>-<seed>)
+#
+# Everything else is passed straight to `node randomize` (see
+# `node randomize --help`). The vanilla image comes from $SOTN_VANILLA_BIN
+# (default ~/.local/share/sotn-rando/vanilla.bin; create it with
+# cli/prepare-image.js). A seed is generated if none is given so the output
+# name is reproducible. Writes NAME.bin, NAME.cue and NAME.log (race info).
+
+set -euo pipefail
+
+repo="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+vanilla="${SOTN_VANILLA_BIN:-$HOME/.local/share/sotn-rando/vanilla.bin}"
+out_dir="$repo/seeds"
+name=""
+preset="default"
+seed=""
+url=""
+has_verbosity=0
+args=()
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --out-dir) out_dir="$2"; shift 2; continue ;;
+    --name) name="$2"; shift 2; continue ;;
+    -i|--in-bin|-o|--out)
+      echo "sotn-rando: $1 is set by the wrapper (use \$SOTN_VANILLA_BIN / --out-dir / --name)" >&2
+      exit 2 ;;
+    -p|--preset) preset="$2" ;;
+    -f|--preset-file) preset="$(basename "${2%.json}")" ;;
+    -s|--seed) seed="$2" ;;
+    -r|--race|-q|--quiet|-t|--tournament|-v*|--verbose) has_verbosity=1 ;;
+    https://*|http://*) url="$1" ;;
+  esac
+  args+=("$1")
+  case "$1" in
+    -p|--preset|-f|--preset-file|-s|--seed) args+=("$2"); shift ;;
+  esac
+  shift
+done
+
+if [ ! -f "$vanilla" ]; then
+  echo "sotn-rando: vanilla image not found at $vanilla" >&2
+  echo "  create it with: $repo/cli/prepare-image.js <dump.cue> $vanilla" >&2
+  exit 1
+fi
+
+if [ -n "$url" ]; then
+  # Seed and options come from the URL.
+  : "${name:=sotn-$(printf '%s' "${url#*\?}" | tr -c 'A-Za-z0-9._-' '_')}"
+else
+  if [ -z "$seed" ]; then
+    seed="$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')"
+    args+=(-s "$seed")
+  fi
+  : "${name:=sotn-${preset}-$(printf '%s' "$seed" | tr -c 'A-Za-z0-9._-' '_')}"
+fi
+[ "$has_verbosity" = 1 ] || args+=(-r)
+
+mkdir -p "$out_dir"
+bin="$out_dir/$name.bin"
+cd "$repo"
+node randomize -i "$vanilla" -o "$bin" "${args[@]}" | tee "$out_dir/$name.log"
+
+cat > "$out_dir/$name.cue" <<EOF
+FILE "$name.bin" BINARY
+  TRACK 01 MODE2/2352
+    INDEX 01 00:00:00
+EOF
+echo "Wrote $out_dir/$name.cue"
