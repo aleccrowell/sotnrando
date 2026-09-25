@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Merge the latest upstream randomizer (sotnrando/sotnrando) into this fork.
+#
+#   cli/sync-upstream [--push]
+#
+# Adds the `upstream` remote if missing, merges upstream/master into the
+# current branch, reinstalls deps if package-lock.json changed, and runs a
+# dry-run smoke test. With --push, pushes the result to origin afterwards.
+
+set -euo pipefail
+
+upstream_url="https://github.com/sotnrando/sotnrando.git"
+upstream_branch="master"
+
+cd "$(dirname "$(readlink -f "$0")")/.."
+
+if ! git remote get-url upstream >/dev/null 2>&1; then
+  git remote add upstream "$upstream_url"
+fi
+if [ -n "$(git status --porcelain)" ]; then
+  echo "sync-upstream: working tree not clean; commit or stash first" >&2
+  exit 1
+fi
+
+git fetch upstream
+before="$(git rev-parse HEAD)"
+git merge --no-edit "upstream/$upstream_branch"
+after="$(git rev-parse HEAD)"
+
+if [ "$before" = "$after" ]; then
+  echo "Already up to date with upstream/$upstream_branch."
+else
+  git --no-pager log --oneline "$before..$after" | head -30
+  if ! git diff --quiet "$before" "$after" -- package.json package-lock.json; then
+    echo "Dependencies changed; running npm ci..."
+    npm ci
+  fi
+fi
+
+echo "Smoke test (dry run, no image needed)..."
+node randomize -s sync-smoke-test -p safe -v >/dev/null
+echo "OK"
+
+if [ "${1:-}" = "--push" ]; then
+  git push origin HEAD
+fi
