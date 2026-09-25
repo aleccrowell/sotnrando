@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Merge the latest upstream randomizer (sotnrando/sotnrando) into this fork.
-#
-#   cli/sync-upstream [--push]
+# Run via `cli/sotn-rando sync [--push]`.
 #
 # Adds the `upstream` remote if missing, merges upstream/master into the
 # current branch, reinstalls deps if package-lock.json changed, and runs a
@@ -12,13 +11,13 @@ set -euo pipefail
 upstream_url="https://github.com/sotnrando/sotnrando.git"
 upstream_branch="master"
 
-cd "$(dirname "$(readlink -f "$0")")/.."
+cd "$(dirname "$(readlink -f "$0")")/../.."
 
 if ! git remote get-url upstream >/dev/null 2>&1; then
   git remote add upstream "$upstream_url"
 fi
 if [ -n "$(git status --porcelain)" ]; then
-  echo "sync-upstream: working tree not clean; commit or stash first" >&2
+  echo "sotn-rando sync: working tree not clean; commit or stash first" >&2
   exit 1
 fi
 
