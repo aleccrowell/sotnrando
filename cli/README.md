@@ -34,9 +34,14 @@ dump and saves what later commands need in `~/.local/share/sotn-rando/`:
 
 Your dump itself is never modified. Most dump formats work:
 
-- a single `.bin` holding every track, or one `.bin` per track
+- one `.bin` per track, as redump and `psxdr archive` lay a disc out, or a
+  single `.bin` holding every track
 - 2352-byte sectors, or 2448-byte sectors that include subchannel data (as
   [psxdr](https://github.com/aleccrowell/psxdr) captures produce)
+- a `MODE2/2336` data track (`psxdr convert --to-format split
+  --data-sector-size 2336`); each sector's 16-byte header is rebuilt
+
+A `.subcode` file beside a psxdr archive is not needed and is ignored.
 
 If the data doesn't match an unmodified SotN (USA) disc, `setup` reports an
 error and saves nothing. The randomizer only works from a clean original.
@@ -115,12 +120,15 @@ track 2 to match and track 1 to differ. `verify` then exits with status 1 and
 suggests recovery commands. Ignore that advice: the difference is the
 randomization.
 
-### About `.iso` files
+### Don't use `.iso` files
 
-`psxdr convert <disc>.bin <disc>.iso --to-format iso --cue <disc>.cue` (needs
-`bchunk`) produces a 2048-byte-per-sector ISO. **Don't play or burn it.** SotN
-stores its music and cutscenes in sectors that an ISO cuts short, so they
-break. An ISO is only useful for browsing the disc's files.
+An ISO can't hold this disc. It stores 2048 bytes per sector, but SotN keeps
+its music and cutscene audio in XA sectors of 2324 bytes, and its audio track
+isn't part of any ISO. An ISO of SotN has that audio cut short or missing, so
+neither `setup` nor anything here produces or accepts one. psxdr doesn't write
+ISOs either: `psxdr archive` stores the full disc as one `.bin` per track plus
+a `.cue`, and `psxdr convert --to-format split` makes the same layout from any
+image.
 
 ## Keeping up to date with upstream
 
