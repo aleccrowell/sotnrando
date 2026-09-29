@@ -11,8 +11,10 @@
 //                FILE "@BIN@" standing in for the image name
 // rest.bin/disc.cue are only written when the dump has tracks after track 1.
 //
-// Handles single-file and split-track (one .bin per track) dumps, and raw
-// sectors carrying 96 bytes of subchannel (2448 bytes/sector).
+// Handles single-file and split-track (one .bin per track) dumps, raw sectors
+// carrying 96 bytes of subchannel (2448 bytes/sector), and data tracks stored
+// MODE2/2336 (psxdr convert --data-sector-size 2336), whose 16-byte sync and
+// header are rebuilt from each sector's position.
 
 const fs = require('fs')
 const path = require('path')
@@ -21,6 +23,7 @@ const constants = require('../../src/constants')
 
 const RAW = 2352
 const SUBCHANNEL = 96
+const MODE2 = 2336
 const SYNC = Buffer.from([0x00].concat(Array(10).fill(0xff), [0x00]))
 
 function die(msg) {
@@ -31,6 +34,17 @@ function die(msg) {
 function msfToFrames(msf) {
   const [m, s, f] = msf.split(':').map(Number)
   return (m * 60 + s) * 75 + f
+}
+
+const bcd = (n) => (Math.floor(n / 10) << 4) | (n % 10)
+
+// The 16 bytes a MODE2/2336 sector leaves out: sync, then the sector's
+// absolute time (LSN + 150) in BCD and mode 2.
+function mode2Header(lsn) {
+  const t = lsn + 150
+  return Buffer.concat([SYNC, Buffer.from([
+    bcd(Math.floor(t / 75 / 60)), bcd(Math.floor(t / 75) % 60), bcd(t % 75), 2,
+  ])])
 }
 
 function framesToMsf(frames) {
@@ -83,21 +97,21 @@ function parseCue(cuePath) {
       if (!fs.existsSync(file)) {
         die('Cue sheet references missing file ' + file)
       }
-      const sectorSize = detectSectorSize(file)
-      files.push({
-        path: file,
-        sectorSize,
-        sectors: Math.floor(fs.statSync(file).size / sectorSize),
-        start: disc,
-      })
+      // Sized at its first TRACK, whose mode says whether it is 2336.
+      files.push({ path: file, start: disc })
     } else if ((m = line.match(/^\s*TRACK\s+(\d+)\s+(\S+)/i))) {
       tracks.push({ number: parseInt(m[1], 10), mode: m[2], indexes: [] })
+      const file = files[files.length - 1]
+      if (file && !file.sectorSize) {
+        file.sectorSize = /\/2336$/.test(m[2]) ? MODE2 : detectSectorSize(file.path)
+        file.sectors = Math.floor(fs.statSync(file.path).size / file.sectorSize)
+      }
     } else if ((m = line.match(/^\s*INDEX\s+(\d+)\s+(\d+:\d+:\d+)/i))) {
       tracks[tracks.length - 1].indexes.push(
         [parseInt(m[1], 10), disc + msfToFrames(m[2])])
     }
   }
-  if (!files.length || !tracks.length) {
+  if (!files.length || !tracks.length || files.some((f) => !f.sectorSize)) {
     die('No FILE/TRACK entries in ' + cuePath)
   }
   return { files, tracks }
@@ -120,8 +134,13 @@ function copySectors(files, from, to, out, hash) {
       fs.readSync(fd, inBuf, 0, n * file.sectorSize,
                   (s - file.start) * file.sectorSize)
       for (let i = 0; i < n; i++) {
-        inBuf.copy(outBuf, i * RAW, i * file.sectorSize,
-                   i * file.sectorSize + RAW)
+        if (file.sectorSize === MODE2) {
+          mode2Header(s + i).copy(outBuf, i * RAW)
+          inBuf.copy(outBuf, i * RAW + RAW - MODE2, i * MODE2, (i + 1) * MODE2)
+        } else {
+          inBuf.copy(outBuf, i * RAW, i * file.sectorSize,
+                     i * file.sectorSize + RAW)
+        }
       }
       const data = outBuf.subarray(0, n * RAW)
       if (hash) {
@@ -164,7 +183,8 @@ const sizes = [...new Set(files.map((f) => f.sectorSize))]
 
 console.log('Dump:        ' + files.map((f) => f.path).join('\n             '))
 console.log('Sector size: ' + sizes.join('/')
-            + (sizes.some((s) => s !== RAW) ? ' (stripping subchannel)' : ''))
+            + (sizes.includes(RAW + SUBCHANNEL) ? ' (stripping subchannel)' : '')
+            + (sizes.includes(MODE2) ? ' (rebuilding sector headers)' : ''))
 console.log('Tracks:      ' + Math.max(tracks.length, 1)
             + ' (track 1: ' + track1End + ' sectors)')
 
@@ -192,8 +212,9 @@ if (track1End < total) {
   fs.closeSync(out)
   const lines = ['FILE "@BIN@" BINARY']
   for (const track of tracks) {
+    // Every track is written back at 2352 bytes per sector.
     lines.push('  TRACK ' + String(track.number).padStart(2, '0') + ' '
-               + track.mode)
+               + track.mode.replace(/\/2336$/, '/2352'))
     for (const [n, frames] of track.indexes) {
       lines.push('    INDEX ' + String(n).padStart(2, '0') + ' '
                  + framesToMsf(frames))
